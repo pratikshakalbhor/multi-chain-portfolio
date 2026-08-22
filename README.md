@@ -1,6 +1,6 @@
 # Multi-Chain Portfolio Valuation
 
-A CLI application that fetches token holdings across multiple EVM networks using Alchemy's Portfolio API, retrieves current prices via Alchemy's Prices API, and calculates a USD valuation with proper handling of partial failures and missing prices.
+A CLI application that fetches token holdings across multiple EVM networks using Alchemy's Portfolio API (`POST /data/v1/{apiKey}/assets/tokens/balances/by-address`), retrieves current prices via Alchemy's Prices API (`POST /prices/v1/{apiKey}/tokens/by-address`), and calculates a USD valuation with proper handling of partial failures and missing prices.
 
 ## Problem
 
@@ -24,7 +24,7 @@ A CLI application that fetches token holdings across multiple EVM networks using
          ▼
 ┌─────────────────┐
 │ Portfolio API   │  (portfolio.ts)
-│ - Fan-out req   │
+│ - Fan-out req   │  POST /data/v1/.../assets/tokens/balances/by-address
 │ - 5 networks    │
 │ - Error check   │
 └────────┬────────┘
@@ -32,7 +32,7 @@ A CLI application that fetches token holdings across multiple EVM networks using
          ▼
 ┌─────────────────┐
 │  Prices API     │  (prices.ts)
-│ - Network+addr  │
+│ - Network+addr  │  POST /prices/v1/.../tokens/by-address (batching)
 │ - Per-token     │
 │ - Error track   │
 └────────┬────────┘
@@ -51,18 +51,26 @@ A CLI application that fetches token holdings across multiple EVM networks using
 
 ### 1. Multi-Network Fan-Out (Portfolio API)
 
-Uses Alchemy SDK's `getTokenBalances(address, networks[])` with explicit network array:
+Uses `POST https://api.g.alchemy.com/data/v1/{apiKey}/assets/tokens/balances/by-address` with an explicit network array:
 
 ```typescript
 const NETWORKS = [
-  Network.ETH_MAINNET,
-  Network.BASE_MAINNET,
-  Network.OPTIMISM_MAINNET,
-  Network.MATIC_MAINNET,
-  Network.BNB_MAINNET,
+  "eth-mainnet",
+  "base-mainnet",
+  "opt-mainnet",
+  "polygon-mainnet",
+  "bnb-mainnet",
 ];
 
-const response = await alchemy.core.getTokenBalances(address, NETWORKS);
+const response = await fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    addresses: [{ address, networks: NETWORKS }],
+    includeNativeTokens: true,
+    includeErc20Tokens: true,
+  }),
+});
 ```
 
 This makes **ONE** request that fans out to all 5 networks. Not 5 separate requests.
@@ -90,9 +98,9 @@ If `partialErrors` exists in the error response:
 
 ### 4. Price Matching (Prices API)
 
-Prices fetched using `getTokenPriceByAddress(network, contractAddress)` for **each unique token** (deduplicated by network + contract address).
+Prices fetched using `POST https://api.g.alchemy.com/prices/v1/{apiKey}/tokens/by-address` for **each unique token** (deduplicated by network + contract address, batched in 20-token chunks to comply with API limits).
 
-**Critical**: Matching uses **both** network AND contract address. USDC on Ethereum (0xA0b86...) and USDC on Base (0x83358...) are treated as completely different tokens.
+**Critical**: Matching uses **both** network AND contract address. USDC on Ethereum (`0xA0b86...`) and USDC on Base (`0x83358...`) are treated as completely different tokens.
 
 ### 5. Token-Level Pricing Errors
 
@@ -110,10 +118,10 @@ Contract: 0x...
 
 ### 6. Valuation Logic
 
-- Converts raw balances using token decimals: `balance / 10^decimals`
+- Converts raw balances using token decimals: `balance / 10^decimals` (supporting both decimal strings and `0x` hex strings)
 - Calculates token value: `formattedBalance * price`
 - Per-chain total: Sum of valued tokens (excluding missing prices)
-- Overall total: Sum of chain totals (null if any chain incomplete)
+- Overall total: Sum of chain totals (null if any chain/token incomplete)
 - Missing prices: Token excluded from numeric total, warning emitted
 
 ### 7. Missing Price Handling
@@ -154,54 +162,37 @@ npm start -- 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
 npx ts-node src/index.ts 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
 ```
 
-## Example Output
+## ✅ Verification
 
-```
-Fetching portfolio for 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045...
+### Automated Tests
 
-========================================
-MULTI-CHAIN PORTFOLIO
-========================================
+The project passes all challenge-specific and supporting tests.
 
-Ethereum
-  WETH
-    Balance: 1.25
-    Price: $2,000.00
-    Value: $2,500.00
-  USDC
-    Balance: 5,000.00
-    Price: $1.00
-    Value: $5,000.00
-  Chain Total: $7,500.00
+- 26/26 tests passing
+- 0 failed
+- TypeScript compilation passes with no errors
 
-Base
-  USDC
-    Balance: 2,000.00
-    Price: $1.00
-    Value: $2,000.00
-  Chain Total: $2,000.00
+![Problem 2 Tests](screenshots/tests-pass.png)
 
-Optimism
-  (no tokens)
-  Chain Total: $0.00
+### Live Multi-Chain Portfolio
 
-Polygon
-  ⚠️ DATA UNAVAILABLE: Network timeout
+The application was verified against the challenge test wallet and successfully fetched live portfolio data across:
 
-BNB Chain
-  (no tokens)
-  Chain Total: $0.00
+- Ethereum Mainnet
+- Base
+- Optimism
+- Polygon
+- BNB Chain
 
-========================================
-TOTAL
-========================================
+The output provides per-chain and per-token balances, prices, values, and clearly identifies tokens whose prices are unavailable.
 
-$9,500.00
+When required pricing data is missing, the application does **not** report a misleading partial total. Instead, it displays:
 
-⚠️ PORTFOLIO INCOMPLETE
-Some network/token data could not be priced or retrieved.
-⚠️ Network data unavailable: Polygon - Network timeout
-```
+`TOTAL: Unknown`
+
+and marks the portfolio as incomplete.
+
+![Live Portfolio](screenshots/live-portfolio.png)
 
 ## Testing
 
@@ -229,13 +220,18 @@ Plus: wallet validation, decimal conversion, token valuation, chain totals, over
 - API key stored in `.env` (gitignored)
 - `.env.example` contains only placeholder
 - No private keys or signing
-- Read-only RPC calls
+- Read-only API requests
 - `.gitignore` excludes `.env`, `node_modules`, `dist`, `coverage`
 
 ## Project Structure
 
 ```
 multi-chain-portfolio/
+│
+├── screenshots/
+│   ├── tests-pass.png
+│   └── live-portfolio.png
+│
 ├── src/
 │   ├── portfolio.ts    # Portfolio API client, fan-out, errors
 │   ├── prices.ts       # Prices API client, network+addr matching
@@ -256,17 +252,16 @@ multi-chain-portfolio/
 
 1. Ethereum Mainnet (`eth-mainnet`)
 2. Base Mainnet (`base-mainnet`)
-3. Optimism Mainnet (`optimism-mainnet`)
-4. Polygon Mainnet (`matic-mainnet`)
+3. Optimism Mainnet (`opt-mainnet`)
+4. Polygon Mainnet (`polygon-mainnet`)
 5. BNB Chain Mainnet (`bnb-mainnet`)
 
 ## APIs Used
 
-- **Alchemy Portfolio API**: `alchemy.core.getTokenBalances(address, networks[])` - Single multi-network request
-- **Alchemy Prices API**: `alchemy.core.getTokenPriceByAddress(network, contractAddress)` - Per-token pricing
+- **Alchemy Portfolio API**: `POST https://api.g.alchemy.com/data/v1/{apiKey}/assets/tokens/balances/by-address` - Single multi-network request
+- **Alchemy Prices API**: `POST https://api.g.alchemy.com/prices/v1/{apiKey}/tokens/by-address` - Per-token pricing (batched in 20-token chunks)
 
 ## Dependencies
 
-- `alchemy-sdk`: Official Alchemy TypeScript SDK
 - `dotenv`: Environment variable loading
 - `typescript`, `ts-node`, `jest`, `ts-jest`: Development tooling
