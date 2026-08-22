@@ -3,6 +3,9 @@ export { TokenHolding, TokenPrice, ValuedToken, ChainValuation, PortfolioValuati
 
 function convertBalance(balance: string, decimals: number): number {
   const divisor = Math.pow(10, decimals);
+  if (balance.startsWith("0x") || balance.startsWith("0X")) {
+    return Number(BigInt(balance)) / divisor;
+  }
   return parseInt(balance, 10) / divisor;
 }
 

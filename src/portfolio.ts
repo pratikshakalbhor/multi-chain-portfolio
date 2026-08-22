@@ -14,6 +14,7 @@ const NETWORK_NAMES: Record<string, string> = {
   "base-mainnet": "Base",
   "opt-mainnet": "Optimism",
   "polygon-mainnet": "Polygon",
+  "matic-mainnet": "Polygon",
   "bnb-mainnet": "BNB Chain",
 };
 
@@ -33,13 +34,21 @@ interface PortfolioApiResponse {
 }
 
 interface PortfolioToken {
-  contractAddress: string;
-  balance: string;
-  decimals: number;
-  symbol: string;
-  name: string;
+  contractAddress?: string | null;
+  tokenAddress?: string | null;
+  balance?: string;
+  tokenBalance?: string;
+  decimals?: number;
+  symbol?: string;
+  name?: string;
   network: string;
   logo?: string;
+  tokenMetadata?: {
+    decimals?: number;
+    symbol?: string;
+    name?: string;
+    logo?: string;
+  };
 }
 
 export class PortfolioClient {
@@ -48,23 +57,37 @@ export class PortfolioClient {
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
-    this.baseUrl = "https://api.g.alchemy.com/v1/portfolio";
+    this.baseUrl = "https://api.g.alchemy.com/data/v1";
   }
 
   async fetchMultiChainHoldings(address: string): Promise<NetworkTokens[]> {
     const results: NetworkTokens[] = [];
+    const safeEndpointPath = "/data/v1/assets/tokens/balances/by-address";
+    const url = `${this.baseUrl}/${this.apiKey}/assets/tokens/balances/by-address`;
 
-    const networksParam = NETWORKS.join(",");
-    const url = `${this.baseUrl}/${address}?networks=${networksParam}`;
+    const requestBody = {
+      addresses: [
+        {
+          address,
+          networks: NETWORKS,
+        },
+      ],
+      includeNativeTokens: true,
+      includeErc20Tokens: true,
+    };
 
     const response = await fetch(url, {
+      method: "POST",
       headers: {
-        "Authorization": `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
         "Accept": "application/json",
       },
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
+      const responseText = await response.text();
+      console.error(`[Portfolio API Error] Status: ${response.status}, Path: ${safeEndpointPath}, Body: ${responseText}`);
       throw new Error(`Portfolio API HTTP error: ${response.status} ${response.statusText}`);
     }
 
@@ -74,9 +97,9 @@ export class PortfolioClient {
       const topLevelError = this.parseError(data.error);
       if (topLevelError.partialErrors && topLevelError.partialErrors.length > 0) {
         for (const network of NETWORKS) {
-          const networkName = NETWORK_NAMES[network];
+          const networkName = NETWORK_NAMES[network] || network;
           const partialError = topLevelError.partialErrors.find(
-            (pe) => pe.network === networkName
+            (pe) => pe.network === networkName || pe.network === network
           );
 
           if (partialError) {
@@ -86,7 +109,13 @@ export class PortfolioClient {
               error: partialError,
             });
           } else {
-            const networkTokens = await this.fetchSingleNetwork(address, network);
+            const networkTokens = (data.data?.tokens || [])
+              .filter(
+                (t) =>
+                  (t.network === network || NETWORK_NAMES[t.network] === networkName) &&
+                  this.hasNonZeroBalance(t)
+              )
+              .map((t) => this.convertToTokenHolding(t));
             results.push({
               network: networkName,
               tokens: networkTokens,
@@ -98,9 +127,13 @@ export class PortfolioClient {
       }
     } else if (data.data?.tokens) {
       for (const network of NETWORKS) {
-        const networkName = NETWORK_NAMES[network];
+        const networkName = NETWORK_NAMES[network] || network;
         const networkTokens = data.data.tokens
-          .filter((t) => t.network === network)
+          .filter(
+            (t) =>
+              (t.network === network || NETWORK_NAMES[t.network] === networkName) &&
+              this.hasNonZeroBalance(t)
+          )
           .map((t) => this.convertToTokenHolding(t));
         results.push({
           network: networkName,
@@ -109,7 +142,7 @@ export class PortfolioClient {
       }
     } else {
       for (const network of NETWORKS) {
-        const networkName = NETWORK_NAMES[network];
+        const networkName = NETWORK_NAMES[network] || network;
         results.push({
           network: networkName,
           tokens: [],
@@ -120,33 +153,17 @@ export class PortfolioClient {
     return results;
   }
 
-  private async fetchSingleNetwork(address: string, network: string): Promise<TokenHolding[]> {
-    const url = `${this.baseUrl}/${address}?networks=${network}`;
-
-    const response = await fetch(url, {
-      headers: {
-        "Authorization": `Bearer ${this.apiKey}`,
-        "Accept": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${NETWORK_NAMES[network]}: ${response.statusText}`);
+  private hasNonZeroBalance(token: PortfolioToken): boolean {
+    const rawBalance = token.tokenBalance || token.balance || "0";
+    if (rawBalance === "0" || rawBalance === "0x0" || rawBalance === "0x00") return false;
+    try {
+      if (rawBalance.startsWith("0x") || rawBalance.startsWith("0X")) {
+        return BigInt(rawBalance) > 0n;
+      }
+      return BigInt(rawBalance) > 0n;
+    } catch {
+      return false;
     }
-
-    const data = (await response.json()) as PortfolioApiResponse;
-
-    if (data.error) {
-      throw new Error(`Failed to fetch ${NETWORK_NAMES[network]}: ${data.error.message}`);
-    }
-
-    if (data.data?.tokens) {
-      return data.data.tokens
-        .filter((t) => t.network === network)
-        .map((t) => this.convertToTokenHolding(t));
-    }
-
-    return [];
   }
 
   private parseError(error: PortfolioApiResponse["error"]): PortfolioError {
@@ -162,14 +179,45 @@ export class PortfolioClient {
   }
 
   private convertToTokenHolding(token: PortfolioToken): TokenHolding {
+    const contractAddress =
+      token.contractAddress || token.tokenAddress || "0x0000000000000000000000000000000000000000";
+    const networkName = NETWORK_NAMES[token.network] || token.network;
+
+    let symbol = token.symbol || token.tokenMetadata?.symbol || "";
+    let name = token.name || token.tokenMetadata?.name || "";
+    let decimals = token.decimals ?? token.tokenMetadata?.decimals ?? 18;
+
+    if (!symbol) {
+      if (
+        token.network === "eth-mainnet" ||
+        token.network === "base-mainnet" ||
+        token.network === "opt-mainnet"
+      ) {
+        symbol = "ETH";
+        name = "Ethereum";
+      } else if (
+        token.network === "polygon-mainnet" ||
+        token.network === "matic-mainnet"
+      ) {
+        symbol = "POL";
+        name = "Polygon";
+      } else if (token.network === "bnb-mainnet") {
+        symbol = "BNB";
+        name = "BNB Chain";
+      } else {
+        symbol = contractAddress === "0x0000000000000000000000000000000000000000" ? "NATIVE" : "TOKEN";
+        name = symbol;
+      }
+    }
+
     return {
-      contractAddress: token.contractAddress,
-      tokenBalance: token.balance,
-      decimals: token.decimals,
-      symbol: token.symbol,
-      name: token.name,
-      network: token.network,
-      logo: token.logo || "",
+      contractAddress,
+      tokenBalance: token.tokenBalance || token.balance || "0",
+      decimals,
+      symbol,
+      name,
+      network: networkName,
+      logo: token.logo || token.tokenMetadata?.logo || "",
     };
   }
 }
