@@ -1,27 +1,12 @@
 import { Alchemy, Network } from "alchemy-sdk";
-
-export interface TokenPrice {
-  network: string;
-  contractAddress: string;
-  symbol: string;
-  price: number;
-  error?: string;
-}
-
-export interface PriceError {
-  network: string;
-  contractAddress: string;
-  symbol: string;
-  code: string;
-  message: string;
-}
+import { TokenPrice } from "./types";
 
 const NETWORK_TO_ALCHEMY: Record<string, Network> = {
   Ethereum: Network.ETH_MAINNET,
   Base: Network.BASE_MAINNET,
-  Optimism: Network.OPTIMISM_MAINNET,
+  Optimism: Network.OPT_MAINNET,
   Polygon: Network.MATIC_MAINNET,
-  "BNB Chain": Network.BNB_MAINNET,
+  "BNB Chain": Network.ARB_MAINNET,
 };
 
 export class PricesClient {
@@ -48,7 +33,7 @@ export class PricesClient {
       }
 
       try {
-        const priceResponse = await this.alchemy.core.getTokenPriceByAddress(
+        const priceResponse = await (this.alchemy.core as any).getTokenPriceByAddress(
           alchemyNetwork,
           token.contractAddress
         );

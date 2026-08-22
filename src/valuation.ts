@@ -1,34 +1,5 @@
-import { TokenBalance } from "alchemy-sdk";
-import { TokenPrice, PriceError } from "./prices";
-
-export interface ValuedToken {
-  network: string;
-  contractAddress: string;
-  symbol: string;
-  name: string;
-  balance: string;
-  decimals: number;
-  balanceFormatted: number;
-  price: number | null;
-  value: number | null;
-  priceError?: string;
-}
-
-export interface ChainValuation {
-  network: string;
-  tokens: ValuedToken[];
-  total: number | null;
-  hasMissingPrices: boolean;
-  missingPriceTokens: string[];
-  networkError?: string;
-}
-
-export interface PortfolioValuation {
-  chains: ChainValuation[];
-  overallTotal: number | null;
-  isComplete: boolean;
-  warnings: string[];
-}
+import { TokenHolding, TokenPrice, ValuedToken, ChainValuation, PortfolioValuation } from "./types";
+export { TokenHolding, TokenPrice, ValuedToken, ChainValuation, PortfolioValuation };
 
 function convertBalance(balance: string, decimals: number): number {
   const divisor = Math.pow(10, decimals);
@@ -36,7 +7,7 @@ function convertBalance(balance: string, decimals: number): number {
 }
 
 function matchPrice(
-  token: TokenBalance,
+  token: TokenHolding,
   prices: TokenPrice[]
 ): { price: number | null; error?: string } {
   const matched = prices.find(
@@ -57,7 +28,7 @@ function matchPrice(
 }
 
 export function calculateValuation(
-  networkTokens: Array<{ network: string; tokens: TokenBalance[]; error?: { network: string; code: string; message: string } }>,
+  networkTokens: Array<{ network: string; tokens: TokenHolding[]; error?: { network: string; code: string; message: string } }>,
   prices: TokenPrice[]
 ): PortfolioValuation {
   const chains: ChainValuation[] = [];
@@ -92,11 +63,11 @@ export function calculateValuation(
       const balanceFormatted = convertBalance(token.tokenBalance, token.decimals);
       const value = price !== null ? balanceFormatted * price : null;
 
-      if (price !== null) {
+      if (value !== null) {
         chainTotal += value;
       } else {
         hasMissingPrices = true;
-        missingPriceTokens.push(`${token.symbol} (${token.contractAddress.slice(0, 8)}...)`);
+        missingPriceTokens.push(token.symbol);
         warnings.push(
           `⚠️ Price unavailable for ${token.symbol} on ${network}. ` +
           `${token.symbol} was excluded from the calculated total.`
@@ -117,19 +88,53 @@ export function calculateValuation(
       });
     }
 
+    const extraErrorPrices = prices.filter(
+      (p) =>
+        p.network === network &&
+        p.error &&
+        !valuedTokens.some(
+          (vt) => vt.contractAddress.toLowerCase() === p.contractAddress.toLowerCase()
+        )
+    );
+
+    for (const ep of extraErrorPrices) {
+      hasMissingPrices = true;
+      if (!missingPriceTokens.includes(ep.symbol)) {
+        missingPriceTokens.push(ep.symbol);
+      }
+      warnings.push(
+        `⚠️ Price unavailable for ${ep.symbol} on ${network}. ` +
+        `${ep.symbol} was excluded from the calculated total.`
+      );
+      valuedTokens.push({
+        network,
+        contractAddress: ep.contractAddress,
+        symbol: ep.symbol,
+        name: ep.symbol,
+        balance: "0",
+        decimals: 0,
+        balanceFormatted: 0,
+        price: null,
+        value: null,
+        priceError: ep.error,
+      });
+    }
+
+    if (hasMissingPrices) {
+      isComplete = false;
+    }
+
+    const allTokensMissingPrices = valuedTokens.length > 0 && valuedTokens.every((t) => t.price === null);
+
     chains.push({
       network,
       tokens: valuedTokens,
-      total: hasMissingPrices && valuedTokens.length === missingPriceTokens.length ? null : chainTotal,
+      total: allTokensMissingPrices ? null : chainTotal,
       hasMissingPrices,
       missingPriceTokens,
     });
 
-    if (!hasMissingPrices || valuedTokens.length > missingPriceTokens.length) {
-      overallTotal += chainTotal;
-    } else {
-      isComplete = false;
-    }
+    overallTotal += chainTotal;
   }
 
   if (!isComplete) {

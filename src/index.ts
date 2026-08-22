@@ -1,10 +1,9 @@
 import "dotenv/config";
 import { createPortfolioClient } from "./portfolio";
 import { createPricesClient } from "./prices";
-import { calculateValuation, PortfolioValuation, ValuedToken, ChainValuation } from "./valuation";
-import { TokenBalance } from "alchemy-sdk";
+import { calculateValuation, PortfolioValuation, ValuedToken, ChainValuation, TokenHolding } from "./valuation";
 
-function validateAddress(address: string): boolean {
+export function validateAddress(address: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
 }
 
@@ -107,7 +106,7 @@ async function main(): Promise<void> {
     const portfolioClient = createPortfolioClient(apiKey);
     const networkTokens = await portfolioClient.fetchMultiChainHoldings(walletAddress);
 
-    const allTokens: TokenBalance[] = [];
+    const allTokens: TokenHolding[] = [];
     for (const nt of networkTokens) {
       if (!nt.error) {
         allTokens.push(...nt.tokens);
@@ -138,4 +137,6 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
